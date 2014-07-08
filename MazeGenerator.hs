@@ -313,12 +313,15 @@ glSetup2D (w, h) = do
     Gl.loadIdentity
 
 
--- terminateMainLoop works around missing function
+-- start/terminateMainLoop work around missing function
 -- 'Glut.leaveMainLoop' when not using freeGLUT
 terminateMainLoop =
-    get Glut.currentWindow >>= maybe (return ()) Glut.destroyWindow
+    get Glut.currentWindow
+    >>= maybe (return ()) Glut.destroyWindow
+    >> throwIO UserInterrupt
 
-
+startMainLoop =
+    handle (\UserInterrupt -> return ()) Glut.mainLoop
 
 --
 -- MAIN
@@ -332,7 +335,7 @@ main = do
     Glut.initialWindowSize  $= uncurry Size screenDims
     Glut.createWindow       "Maze Generator"
 
-    glSetup2D screenDims
+    glSetup2D       screenDims
     Gl.clearColor   $= Color4 0.9 0.9 0.9 (1.0 :: GLfloat)              -- clearing the screen: everything is a white(ish) wall
     Gl.color        $  Color3 0.1 0.1 (0.1 :: GLfloat)                  -- then draw all walkable maze fields dark
              
@@ -355,7 +358,7 @@ main = do
                 putStrLn ("generating " ++ show howMany ++ " mazes")
                 Glut.displayCallback        $= glutDisplayCallback appState
                 Glut.addTimerCallback 20    (replicateM_ howMany (generateMaze appState) >> terminateMainLoop)
-                Glut.mainLoop
+                startMainLoop
                 
         _ -> do
             showKeyBindings
@@ -363,7 +366,7 @@ main = do
             Glut.reshapeCallback        $= Just (glutReshapeCallback appState)
             Glut.keyboardMouseCallback  $= Just (glutInputCallback appState)
             Glut.addTimerCallback 50    (generateMaze appState >> handleRebuild appState)            
-            Glut.mainLoop
+            startMainLoop
 
   where
     showKeyBindings = putStrLn
