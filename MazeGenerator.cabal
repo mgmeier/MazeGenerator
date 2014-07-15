@@ -20,7 +20,7 @@ executable MazeGenerator
   build-depends:        base                    >=4.7 && <5, 
                         OpenGL                  >=2.9 && <3, 
                         GLUT                    >=2.5 && <2.6, 
-                        unordered-containers    >=0.2.4 && <0.2.5,
+                        unordered-containers    >=0.2.4 && <0.2.6,
                         random                  >=1.0 && <1.1
 
   default-language:     Haskell2010
