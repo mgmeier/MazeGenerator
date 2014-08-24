@@ -336,8 +336,8 @@ main = do
     Glut.createWindow       "Maze Generator"
 
     glSetup2D       screenDims
-    Gl.clearColor   $= Color4 0.9 0.9 0.9 (1.0 :: GLfloat)              -- clearing the screen: everything is a white(ish) wall
-    Gl.color        $  Color3 0.1 0.1 (0.1 :: GLfloat)                  -- then draw all walkable maze fields dark
+    Gl.clearColor   $= Color4 0.1 0.1 0.1 (1.0 :: GLfloat)
+    Gl.color        $  Color3 0.8 0.8 (0.8 :: GLfloat)
              
     appState <- newIORef AppState
         { asMaze        = emptyMaze mazeDims
