@@ -42,6 +42,7 @@ data AppState = AppState
     , asQuadWH      :: (GLfloat, GLfloat)                               -- quad dimensions on screen
     , asScreenWH    :: (GLint, GLint)                                   -- current screen resolution
     , asNeedBuild   :: Bool                                             -- need to build a new maze?
+    , asNeedSolve   :: Bool
     , asShowBuild   :: Bool                                             -- step-by-step animation of the generation process? (slow)
     , asBuildBias   :: GenerationBias                                   -- bias will influence the pattern of the resulting maze
     , asBuilding    :: Bool                                             -- building in progress
@@ -166,10 +167,35 @@ generateMaze appState = do
 solveMaze :: MVar AppState -> IO ()
 solveMaze appState = do
     AppState {..} <- readMVar appState
+    let
+        maze = exit:(fst asMaze)
+        exit = let (right, upper) = maximum (fst asMaze) in (right+1, upper)
+        doesExit = dropWhile ((/= exit) . head)
+        moves (x, y) = [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
+        
+        recurse free sols 
+            | HS.null free || null sols = return Nothing
+            | otherwise = do
+                let 
+                    sols' = [ concatMap (:sol) ms
+                        | sol@(s:_) <- sols
+                        , let ms = filter (flip HS.member free) $ moves s
+                        , (not . null) ms
+                        ]
+                    sols_ = (HS.toList . HS.fromList . concat) sols'
+                    occup = map head sols'
+                    free' = foldr HS.delete free occup
+                showMaze asQuadWH (Just sols_) maze
+                threadDelay 10000
+                case doesExit sols' of
+                    x:_ -> return (Just x)
+                    _   -> recurse free' sols'
     
-    recurse
-  where
-    recurse = return ()
+    sol <- recurse (HS.fromList maze) [[(0, 1)]]
+    modifyMVar_ appState $
+        \st -> return st {asSolution = sol, asNeedSolve = False}
+  
+    
 
 
 -- projection function from a maze coordinate (empty cell) to its
@@ -287,6 +313,8 @@ glutInputCallback appState key Down _ _ = do
             | c == '-'      -> cycleBias pred
             | c == ' '      ->  
                  modifyMVar_ appState $ \st -> return st {asNeedBuild = True}
+            | ord c == 13   ->  
+                 modifyMVar_ appState $ \st -> return st {asNeedSolve = True}
 
         SpecialKey sk
             | sk == KeyLeft     && w > 8    -> newMazeDims (w-1, h)
@@ -320,12 +348,16 @@ glutDisplayCallback appState = do
     unless asBuilding $ showMaze asQuadWH asSolution (fst asMaze)
 
 
--- handleRebuild periodically checks if a new maze has to
--- be generated, triggering it when necessary
+-- handleRebuild periodically checks if a maze has to
+-- be generated or solved, triggering it when necessary
 handleRebuild :: MVar AppState -> Glut.TimerCallback
 handleRebuild appState = do
-    build <- asNeedBuild `fmap` readMVar appState
-    when build (generateMaze appState)
+    readMVar appState >>= \case
+        AppState {asNeedBuild = True} ->
+            generateMaze appState
+        AppState {asNeedSolve = True} ->
+            solveMaze appState
+        _ -> return ()
     Glut.addTimerCallback 50 (handleRebuild appState)
 
 
@@ -371,6 +403,7 @@ main = do
         , asQuadWH      = getQuadWH screenDims mazeDims
         , asScreenWH    = screenDims
         , asNeedBuild   = False
+        , asNeedSolve   = False
         , asShowBuild   = False
         , asBuildBias   = NoBias
         , asBuilding    = False
@@ -399,6 +432,7 @@ main = do
     showKeyBindings = putStrLn
         "Key Bindings:\n\
         \  (Space)              - create new maze\n\
+        \  (Enter)              - solve maze\n\
         \  (Arrow left/right)   - adjust maze width\n\
         \  (Arrow up/down)      - adjust maze height\n\
         \  +, -                 - change maze pattern via generation bias\n\
