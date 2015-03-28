@@ -7,11 +7,12 @@ import  Graphics.UI.GLUT                as Glut
 import  qualified Data.HashMap.Strict   as HM
 import  qualified Data.HashSet          as HS
 
-import  Data.IORef                      hiding (modifyIORef)            -- hide lazy modify to avoid error by typo
 import  Data.Char                       (ord)
 import  Data.Bool                       (bool)
 
-import  Control.Monad                   (when, unless, replicateM_)
+import  Control.Concurrent.MVar
+import  Control.Concurrent
+import  Control.Monad
 import  Control.Exception
 
 import  System.Random                   (randomRIO)
@@ -38,13 +39,14 @@ data GenerationBias =
 data AppState = AppState
     { asMaze        :: Maze                                             -- the current maze
     , asDims        :: (Int, Int)                                       -- maze dimensions
-    , asQuadWH     :: (GLfloat, GLfloat)                               -- quad dimensions on screen
+    , asQuadWH      :: (GLfloat, GLfloat)                               -- quad dimensions on screen
     , asScreenWH    :: (GLint, GLint)                                   -- current screen resolution
     , asNeedBuild   :: Bool                                             -- need to build a new maze?
     , asShowBuild   :: Bool                                             -- step-by-step animation of the generation process? (slow)
     , asBuildBias   :: GenerationBias                                   -- bias will influence the pattern of the resulting maze
     , asBuilding    :: Bool                                             -- building in progress
     , asEmptyMaze   :: Maze                                             -- an empty maze, memo'd for performance issues
+    , asSolution    :: Maybe [MazeIx]
     }
 
 
@@ -76,7 +78,7 @@ data AppState = AppState
 -- * randomFunc is a function that has different implementations
 --   regarding GenereationBias
 depthFirstSearch :: ([MazeIx] -> IO ()) -> (MazeIx -> [MazeIx] -> IO MazeIx) -> Maze -> Int -> IO Maze
-depthFirstSearch drawNewFrame randomFunc (maze_, neighbMemos) = 
+depthFirstSearch buildSnapshot randomFunc (maze_, neighbMemos) = 
     depthFirstSearch' maze_ HS.empty (0, 0) []                          -- (0, 0) with empty stack results in a random starting point
 
   where
@@ -108,7 +110,7 @@ depthFirstSearch drawNewFrame randomFunc (maze_, neighbMemos) =
                 let
                     tearDown    = ((cx+nx) `div` 2, (cy+ny) `div` 2)
                     maze'       = tearDown:maze
-                drawNewFrame maze'                                           -- possibly a visual update of the generation process
+                buildSnapshot maze'                                           -- possibly a visual update of the generation process
                 depthFirstSearch' maze' visit' next (current:stack) rem'     -- Note: 1
 
 
@@ -133,22 +135,41 @@ emptyMaze (mazeW, mazeH) =
             
 
 generateMaze appState = do
-    AppState {..} <- readIORef appState
+    AppState {..} <- readMVar appState
+    buildMV     <- newMVar []
+    buildDoneMV <- newEmptyMVar
     let
-        drawNewFrame False _    = return ()
-        drawNewFrame True  maze = showMaze asQuadWH maze
+        renderLoop = do
+            when asShowBuild (readMVar buildMV >>= showMaze asQuadWH Nothing)
+            threadDelay 20000
+            tryTakeMVar buildDoneMV >>= maybe renderLoop return
+        
+        buildSnapshot False _  = return ()
+        buildSnapshot True  xs = swapMVar buildMV xs >> threadDelay 1000
+        buildThread =
+            depthFirstSearch
+                (buildSnapshot asShowBuild)
+                (randomBias asBuildBias asDims)
+                asEmptyMaze 
+                (uncurry (*) asDims)
+            >>= putMVar buildDoneMV         
 
-    modifyIORef' appState $
-        \st -> st {asNeedBuild = False, asBuilding = True}
-    maze <- depthFirstSearch
-        (drawNewFrame asShowBuild)
-        (randomBias asBuildBias asDims)
-        asEmptyMaze 
-        (uncurry (*) asDims)
-    modifyIORef' appState $
-        \st -> st {asMaze = maze, asBuilding = False}
+    modifyMVar_ appState $
+        \st -> return st {asNeedBuild = False, asBuilding = True, asSolution = Nothing}
+    forkIO buildThread
+    maze <- renderLoop
+    modifyMVar_ appState $
+        \st -> return st {asMaze = maze, asBuilding = False}
     glutDisplayCallback appState
 
+
+solveMaze :: MVar AppState -> IO ()
+solveMaze appState = do
+    AppState {..} <- readMVar appState
+    
+    recurse
+  where
+    recurse = return ()
 
 
 -- projection function from a maze coordinate (empty cell) to its
@@ -207,12 +228,17 @@ getQuadWH (w, h) (mazeW, mazeH) =
 
 
 -- produces 1 frame, rendering the maze with given quad sizes
-showMaze :: (GLfloat, GLfloat) -> [MazeIx] -> IO ()
-showMaze (w, h) maze = do
+showMaze :: (GLfloat, GLfloat) -> Maybe [MazeIx] -> [MazeIx] -> IO ()
+showMaze (w, h) redCells maze = do
     Gl.clear [ColorBuffer, DepthBuffer]
-    Gl.loadIdentity
     Gl.unsafeRenderPrimitive Quads $
         mapM_ drawQuad maze
+    flip (maybe (return ())) redCells $ \ rs -> do
+        Gl.color        $  Color3 0.6 0.1 (0.1 :: GLfloat)
+        Gl.unsafeRenderPrimitive Quads $
+            mapM_ drawQuad rs
+        Gl.color        $  Color3 0.8 0.8 (0.8 :: GLfloat)
+
     Glut.swapBuffers
 
   where
@@ -229,15 +255,15 @@ showMaze (w, h) maze = do
         glVertex2f x (y+h)
 
 
-glutInputCallback :: IORef AppState -> Glut.KeyboardMouseCallback
+glutInputCallback :: MVar AppState -> Glut.KeyboardMouseCallback
 glutInputCallback appState key Down _ _ = do
-    AppState {..} <- readIORef appState
+    AppState {..} <- readMVar appState
     let
         (w, h)      = asDims
         key'        = bool key (SpecialKey $ KeyUnknown 0) asBuilding   -- disregard keyboard input while building
 
         newMazeDims mazeDims' =
-            modifyIORef' appState $ \st -> st
+             modifyMVar_ appState $ \st -> return st
                 { asDims        = mazeDims'
                 , asQuadWH      = getQuadWH asScreenWH mazeDims'
                 , asNeedBuild   = True
@@ -248,7 +274,7 @@ glutInputCallback appState key Down _ _ = do
         cycleBias withFunc =
             try (evaluate $ withFunc asBuildBias) >>= either
                 (\(SomeException _) -> return ())
-                (\bias' -> modifyIORef' appState $ \st -> st
+                (\bias' ->  modifyMVar_ appState $ \st -> return st
                     { asNeedBuild   = True
                     , asShowBuild   = False
                     , asBuildBias   = bias'
@@ -260,7 +286,7 @@ glutInputCallback appState key Down _ _ = do
             | c == '+'      -> cycleBias succ
             | c == '-'      -> cycleBias pred
             | c == ' '      ->  
-                modifyIORef' appState $ \st -> st {asNeedBuild = True}
+                 modifyMVar_ appState $ \st -> return st {asNeedBuild = True}
 
         SpecialKey sk
             | sk == KeyLeft     && w > 8    -> newMazeDims (w-1, h)
@@ -268,8 +294,8 @@ glutInputCallback appState key Down _ _ = do
             | sk == KeyUp       && h < 256  -> newMazeDims (w, h+1)
             | sk == KeyDown     && h > 8    -> newMazeDims (w, h-1)
             | sk == KeyF1 ->
-                modifyIORef' appState $
-                    \st -> st {asShowBuild = not asShowBuild}
+                 modifyMVar_ appState $
+                    \st -> return st {asShowBuild = not asShowBuild}
 
         _   -> return ()
 
@@ -277,28 +303,28 @@ glutInputCallback _ _ _ _ _ =
     return ()
 
 
-glutReshapeCallback :: IORef AppState -> Glut.ReshapeCallback
+glutReshapeCallback :: MVar AppState -> Glut.ReshapeCallback
 glutReshapeCallback appState (Size w h) = do
     glSetup2D (w, h)
-    dims <- asDims `fmap` readIORef appState
-    modifyIORef' appState $ \st -> st
+    dims <- asDims `fmap` readMVar appState
+    modifyMVar_ appState $ \st -> return st
         { asQuadWH      = getQuadWH (w, h) dims
         , asScreenWH    = (w, h)
         }
     Glut.postRedisplay Nothing
 
 
-glutDisplayCallback :: IORef AppState -> Glut.DisplayCallback
+glutDisplayCallback :: MVar AppState -> Glut.DisplayCallback
 glutDisplayCallback appState = do
-    AppState {..} <- readIORef appState
-    unless asBuilding $ showMaze asQuadWH (fst asMaze)
+    AppState {..} <- readMVar appState
+    unless asBuilding $ showMaze asQuadWH asSolution (fst asMaze)
 
 
 -- handleRebuild periodically checks if a new maze has to
 -- be generated, triggering it when necessary
-handleRebuild :: IORef AppState -> Glut.TimerCallback
+handleRebuild :: MVar AppState -> Glut.TimerCallback
 handleRebuild appState = do
-    build <- asNeedBuild `fmap` readIORef appState
+    build <- asNeedBuild `fmap` readMVar appState
     when build (generateMaze appState)
     Glut.addTimerCallback 50 (handleRebuild appState)
 
@@ -339,7 +365,7 @@ main = do
     Gl.clearColor   $= Color4 0.1 0.1 0.1 (1.0 :: GLfloat)
     Gl.color        $  Color3 0.8 0.8 (0.8 :: GLfloat)
              
-    appState <- newIORef AppState
+    appState <- newMVar AppState
         { asMaze        = emptyMaze mazeDims
         , asDims        = mazeDims
         , asQuadWH      = getQuadWH screenDims mazeDims
@@ -349,6 +375,7 @@ main = do
         , asBuildBias   = NoBias
         , asBuilding    = False
         , asEmptyMaze   = emptyMaze mazeDims
+        , asSolution    = Nothing
         }
     
     getArgs >>= \case
