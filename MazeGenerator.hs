@@ -2,21 +2,22 @@
 
 import  Types
 import  GL
+import  RandomGeneration
 
 import  Graphics.Rendering.OpenGL       as Gl
 import  Graphics.UI.GLUT                as Glut
 
-import  qualified Data.Set              as HS
+import  qualified Data.Set              as S
 
 import  Control.Concurrent
 
-import  System.Random                   (randomRIO)
 import  System.Environment              (getArgs)
 
 
 mazeDims        = (56, 48)                                              -- refers to the amount of empty cells in a maze
 
 screenDims      = (800, 600)                                            -- initial window dimensions
+
 
 {-
   Source:
@@ -42,9 +43,8 @@ screenDims      = (800, 600)                                            -- initi
 
 
 -- tail-recursive implementation of Depth-first search algorithm
--- * buildSnapshot action is executed whenever a maze wall is torn down
--- * randomFunc is a function that has different implementations
---   regarding GenereationBias
+-- * buildSnapshot must announce a visual update of the generation process
+-- * randomFunc must make a random pick which is GenerationBias-aware
 depthFirstSearch
     :: ([MazeIx] -> IO ()) 
     -> (MazeIx -> [MazeIx] -> IO MazeIx) 
@@ -53,26 +53,26 @@ depthFirstSearch
     -> Int 
     -> IO [MazeIx]
 depthFirstSearch buildSnapshot randomFunc neighboursAround maze_ = 
-    depthFirstSearch' maze_ HS.empty (0, 0) []                          -- (0, 0) with empty stack results in a random starting point
+    depthFirstSearch' maze_ S.empty (0, 0) []                           -- (0, 0) with empty stack results in a random starting point
 
   where
-    emptyCells = HS.fromList maze_
+    emptyCells = S.fromList maze_
 
     depthFirstSearch' maze _ _ _ 0 = return maze                        -- no remaining unvisited cells? done!
     depthFirstSearch' maze visit current@(cx, cy) stack rem =
         let
             unvisitedNeighbs =
-                [ix | ix <- neighboursAround current, not (HS.member ix visit)] 
+                [ix | ix <- neighboursAround current, not (S.member ix visit)] 
             
             (visit', rem')                                              -- adjust remaining unvisited cell count and mark current cell as visited if necessary
-                | HS.member current visit   = (visit, rem)
-                | otherwise                 = (HS.insert current visit, rem-1)
+                | S.member current visit   = (visit, rem)
+                | otherwise                 = (S.insert current visit, rem-1)
       
         in if null unvisitedNeighbs
             then case stack of
                 [] -> do
                     next <- randomElement $
-                        HS.toList (HS.difference emptyCells visit)      -- all unvisited cells is the set difference between empty and visited cells
+                        S.toList (S.difference emptyCells visit)        -- all unvisited cells is the set difference between empty and visited cells
                     depthFirstSearch' maze visit' next stack rem'       -- Note: 3                            
                 c:cs ->
                     depthFirstSearch' maze visit' c cs rem'             -- Note: 2
@@ -82,18 +82,19 @@ depthFirstSearch buildSnapshot randomFunc neighboursAround maze_ =
                 let
                     tearDown    = ((cx+nx) `div` 2, (cy+ny) `div` 2)
                     maze'       = tearDown:maze
-                buildSnapshot maze'                                           -- possibly a visual update of the generation process
+                buildSnapshot maze'                                          -- things have changed; give an update to whom it may concern
                 depthFirstSearch' maze' visit' next (current:stack) rem'     -- Note: 1
 
 
-
+-- (possibly animated) generation of a new maze conforming to the
+-- parameters held in the application state.
 generateMaze :: MVar AppState -> IO ()
 generateMaze appState = do
-    AppState {..} <- readMVar appState
-    buildMV     <- newMVar []
-    buildDoneMV <- newEmptyMVar
+    AppState {..}   <- readMVar appState
+    buildMV         <- newMVar []
+    buildDoneMV     <- newEmptyMVar
     let
-        neighboursAround (x, y) =                                           -- the neighboring empty maze cells
+        neighboursAround (x, y) =                                       -- the neighboring empty maze cells
             filter clipping [(x-2, y), (x+2, y), (x, y-2), (x, y+2)]
           where
             clipping (i, j) =
@@ -125,17 +126,18 @@ generateMaze appState = do
     glutDisplayCallback appState
 
 
+-- animates the algorithm that solves the current maze on display.
 solveMaze :: MVar AppState -> IO ()
 solveMaze appState = do
-    AppState {..} <- readMVar appState
-    solveMV     <- newMVar []
-    solveDoneMV <- newEmptyMVar
+    AppState {..}   <- readMVar appState
+    solveMV         <- newMVar []
+    solveDoneMV     <- newEmptyMVar
     let
         maze    = exit:asMaze
         enter   = (0, 1)
         exit    = let (right, upper) = maximum asMaze in (right+1, upper)      
         
-        doesExit     = dropWhile ((/= exit) . head)
+        doesExit     = dropWhile ((/= exit) . head)                     -- look for the first path to hit the exit
         moves (x, y) = [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
 
         renderLoop = do
@@ -143,70 +145,38 @@ solveMaze appState = do
             threadDelay 18000
             tryTakeMVar solveDoneMV >>= maybe renderLoop return  
      
+        -- the solver basically keeps track of all paths it is walking
+        -- simultaneously as a list of paths (sols). it tries to extend
+        -- these paths with maze indices found in the Set (free). paths
+        -- which can't be extended further are removed from the list.
+        -- NB. this algorithm can't solve mazes with circular paths.
         solveRecursive free sols 
-            | HS.null free || null sols = putMVar solveDoneMV Nothing
+            | S.null free || null sols = putMVar solveDoneMV Nothing    -- conditions on which a maze is unsolvable
             | otherwise = do
                 let 
                     sols' = concat [ map (:sol) ms
                         | sol@(s:_) <- sols
-                        , let ms = filter (flip HS.member free) $ moves s
+                        , let ms = filter (flip S.member free) $ moves s
                         , (not . null) ms
                         ]
-                    free' = foldr HS.delete free (map head sols')
-                    reds  = (HS.toList . HS.fromList . concat) sols'
+                    free' = foldr S.delete free (map head sols')        -- remove recent path extensions from the Set
+                    reds  = (S.toList . S.fromList . concat) sols'
                 
                 swapMVar solveMV reds
                 threadDelay 7600
+                
                 case doesExit sols' of
                     x:_ -> putMVar solveDoneMV (Just x)
                     _   -> solveRecursive free' sols'
     
     modifyMVar_ appState $
         \st -> return st {asNeedSolve = False, asRunning = True, asSolution = Nothing}    
-    forkIO (solveRecursive (HS.fromList maze) [[enter]])
+    forkIO (solveRecursive (S.fromList maze) [[enter]])
     sol <- renderLoop
     modifyMVar_ appState $
         \st -> return st {asSolution = sol, asRunning = False}
     glutDisplayCallback appState
   
-    
-
-randomElement :: [a] -> IO a
-randomElement []    = fail "randomElement: empty list"
-randomElement [x]   = return x
-randomElement xs    = (xs !!) `fmap` randomRIO (0, length xs - 1)
-
-
--- implementations for GenerationBias; the basic
--- functionality is shifting the odds between randomly
--- choosing the horizontal or vertical neighbour of a maze cell
-randomBias :: GenerationBias -> (Int, Int) -> MazeIx -> [MazeIx] -> IO MazeIx
-randomBias NoBias _ _ xs =
-    randomElement xs
-
-randomBias CheckerBoard dims@(mazeW, mazeH) ix@(x, y) xs =
-    let
-        sqX     = 2*x `div` mazeW
-        sqY     = 2*y `div` mazeH
-        bias    = bool HorizBias VertBias $
-            (odd sqY && even sqX) || (odd sqX && even sqY)
-    in randomBias bias dims ix xs
-
-randomBias DiagonalSplit dims@(mazeW, mazeH) ix@(x, y) xs =
-    let bias    = bool VertBias HorizBias $ x > (y * mazeW) `div` mazeH
-    in randomBias bias dims ix xs    
-
-randomBias bias _ (x, y) xs =
-    let biased = filter filterFunc xs
-    in randomElement $ concat $ xs : replicate 3 biased
-
-  where 
-    filterFunc = case bias of
-        VertBias    -> (== x) . fst
-        _           -> (== y) . snd                                     -- other biases than HorizBias matched beforehand
-
-
-
 
 -- triggerAction periodically checks if a maze has to
 -- be generated or solved and runs the appropriate action
@@ -221,12 +191,9 @@ triggerAction appState = do
     
     Glut.addTimerCallback 50 (triggerAction appState)
 
-
-
 --
 -- MAIN
 --
-
 main = do
     putStrLn "Maze Generator (c) by M. G. Meier 2014-15\n"
 
@@ -256,7 +223,7 @@ main = do
     showKeyBindings = putStrLn
         "Key Bindings:\n\
         \  (Space)              - create new maze\n\
-        \  (Enter)              - solve maze\n\
+        \  (Enter)              - solve maze (animated)\n\
         \  (Arrow left/right)   - adjust maze width\n\
         \  (Arrow up/down)      - adjust maze height\n\
         \  +, -                 - change maze pattern via generation bias\n\

@@ -17,27 +17,28 @@ import  Control.Concurrent.MVar     as ReExport
 import  Control.Monad               as ReExport
 
 
--- lists all maze fields that are walkable (empty cells, teardowns)
-type MazeIx     = (Int, Int)
+-- a maze is defined by a list of maze indices [MazeIx].
+-- these refer to all maze fields that are walkable.
+type MazeIx = (Int, Int)
 
 
--- influence the likelihood of a neighbouring cell being chosen
--- during maze generation, resulting in different visual patterns
+-- different visual patterns for the maze
 data GenerationBias =
     NoBias | VertBias | HorizBias | CheckerBoard  | DiagonalSplit
     deriving Enum
 
 
+-- application state
 data AppState = AppState
-    { asMaze        :: [MazeIx]                                          -- the current maze
+    { asMaze        :: [MazeIx]                                         -- the current maze
     , asDims        :: (Int, Int)                                       -- maze dimensions
     , asQuadWH      :: (GLfloat, GLfloat)                               -- quad dimensions on screen
     , asScreenWH    :: (GLint, GLint)                                   -- current screen resolution
     , asNeedBuild   :: Bool                                             -- need to build a new maze?
     , asNeedSolve   :: Bool                                             -- need to find a solution?
-    , asShowBuild   :: Bool                                             -- step-by-step animation of the generation process? (slow)
-    , asBuildBias   :: GenerationBias                                   -- bias will influence the pattern of the resulting maze
-    , asRunning     :: Bool                                             -- some animations is in progress
+    , asShowBuild   :: Bool                                             -- animate the generation process?
+    , asBuildBias   :: GenerationBias                                   -- bias will influence the maze pattern
+    , asRunning     :: Bool                                             -- some animatios is in progress
     , asSolution    :: Maybe [MazeIx]                                   -- if a solution has been found, remember it
     }
 
