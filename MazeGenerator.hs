@@ -142,11 +142,11 @@ generateMaze appState = do
     let
         renderLoop = do
             when asShowBuild (readMVar buildMV >>= showMaze asQuadWH Nothing)
-            threadDelay 20000
+            threadDelay 18000
             tryTakeMVar buildDoneMV >>= maybe renderLoop return
         
         buildSnapshot False _  = return ()
-        buildSnapshot True  xs = swapMVar buildMV xs >> threadDelay 1000
+        buildSnapshot True  xs = swapMVar buildMV xs >> threadDelay 2000
         buildThread =
             depthFirstSearch
                 (buildSnapshot asShowBuild)
@@ -167,33 +167,44 @@ generateMaze appState = do
 solveMaze :: MVar AppState -> IO ()
 solveMaze appState = do
     AppState {..} <- readMVar appState
+    solveMV     <- newMVar []
+    solveDoneMV <- newEmptyMVar
     let
-        maze = exit:(fst asMaze)
-        exit = let (right, upper) = maximum (fst asMaze) in (right+1, upper)
-        doesExit = dropWhile ((/= exit) . head)
+        maze    = exit:(fst asMaze)
+        enter   = (0, 1)
+        exit    = let (right, upper) = maximum (fst asMaze) in (right+1, upper)
+        
+        renderLoop = do
+            readMVar solveMV >>= flip (showMaze asQuadWH) maze . Just
+            threadDelay 18000
+            tryTakeMVar solveDoneMV >>= maybe renderLoop return        
+        
+        doesExit     = dropWhile ((/= exit) . head)
         moves (x, y) = [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
         
         recurse free sols 
-            | HS.null free || null sols = return Nothing
+            | HS.null free || null sols = putMVar solveDoneMV Nothing
             | otherwise = do
                 let 
-                    sols' = [ concatMap (:sol) ms
+                    sols' = concat [ map (:sol) ms
                         | sol@(s:_) <- sols
                         , let ms = filter (flip HS.member free) $ moves s
                         , (not . null) ms
                         ]
-                    sols_ = (HS.toList . HS.fromList . concat) sols'
-                    occup = map head sols'
-                    free' = foldr HS.delete free occup
-                showMaze asQuadWH (Just sols_) maze
-                threadDelay 10000
+                    free' = foldr HS.delete free (map head sols')
+                    reds  = (HS.toList . HS.fromList . concat) sols'
+                
+                swapMVar solveMV reds
+                threadDelay 7600
                 case doesExit sols' of
-                    x:_ -> return (Just x)
+                    x:_ -> putMVar solveDoneMV (Just x)
                     _   -> recurse free' sols'
     
-    sol <- recurse (HS.fromList maze) [[(0, 1)]]
+    forkIO (recurse (HS.fromList maze) [[enter]])
+    sol <- renderLoop
     modifyMVar_ appState $
         \st -> return st {asSolution = sol, asNeedSolve = False}
+    glutDisplayCallback appState
   
     
 
@@ -281,12 +292,14 @@ showMaze (w, h) redCells maze = do
         glVertex2f x (y+h)
 
 
+
 glutInputCallback :: MVar AppState -> Glut.KeyboardMouseCallback
 glutInputCallback appState key Down _ _ = do
     AppState {..} <- readMVar appState
     let
         (w, h)      = asDims
-        key'        = bool key (SpecialKey $ KeyUnknown 0) asBuilding   -- disregard keyboard input while building
+        key'        = bool key (SpecialKey $ KeyUnknown 0) 
+            (asBuilding || asNeedSolve)   -- disregard keyboard input while building or solving
 
         newMazeDims mazeDims' =
              modifyMVar_ appState $ \st -> return st
