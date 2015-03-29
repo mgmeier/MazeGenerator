@@ -1,6 +1,6 @@
 name:                MazeGenerator
 version:             0.1.0.0
-synopsis:            A 2D maze generator with OpenGL display
+synopsis:            A 2D maze generator/solver with OpenGL display
 license:             PublicDomain
 license-file:        LICENSE
 author:              M. G. Meier
@@ -13,16 +13,14 @@ cabal-version:       >=1.10
 executable MazeGenerator
   main-is:              MazeGenerator.hs
   
-  ghc-options:          -O2 -funbox-strict-fields
-                        -threaded -with-rtsopts=-N
+  ghc-options:          -O2 -threaded -with-rtsopts=-N
   
   other-extensions:     RecordWildCards, LambdaCase
 
-  build-depends:        base                    >=4.7 && <5, 
+  build-depends:        base                    >=4.7 && <5,
+                        random                  >=1.0 && <1.2,
+                        containers              >=0.5 && <0.6, 
                         OpenGL                  >=2.9 && <3, 
-                        GLUT                    >=2.5 && <2.6, 
-                        unordered-containers    >=0.2.4 && <0.2.6,
-                        random                  >=1.0 && <1.1
+                        GLUT                    >=2.5 && <3 
 
   default-language:     Haskell2010
-
