@@ -1,15 +1,15 @@
-{-# LANGUAGE RecordWildCards, LambdaCase #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module  GL where
 
-import  Types
+import           Types
 
-import  Graphics.Rendering.OpenGL       as Gl
-import  Graphics.UI.GLUT                as Glut
+import           Graphics.Rendering.OpenGL as Gl
+import           Graphics.UI.GLUT          as Glut
 
-import  Control.Exception
+import           Control.Exception
 
-import  Data.Char                       (ord)
+import           Data.Char                 (ord)
 
 
 
@@ -21,7 +21,7 @@ showMaze (w, h) redCells maze = do
     Gl.clear [ColorBuffer]
     Gl.unsafeRenderPrimitive Quads $
         mapM_ drawQuad maze
-    flip (maybe (return ())) redCells $ \ rs -> do
+    forM_ redCells $ \rs -> do
         Gl.color        $  Color3 0.6 0.1 (0.1 :: GLfloat)
         Gl.unsafeRenderPrimitive Quads $
             mapM_ drawQuad rs
@@ -30,9 +30,9 @@ showMaze (w, h) redCells maze = do
 
   where
     glVertex2f x y = Gl.vertex $ Vertex2 x y
-  
+
     -- draws a quad (counter-clockwise)
-    drawQuad (blX, blY) = do                             
+    drawQuad (blX, blY) = do
         let
             x = fromIntegral blX * w
             y = fromIntegral blY * h
@@ -71,9 +71,9 @@ glutInputCallback appState key Down _ _ = do
             | ord c == 27   -> terminateMainLoop
             | c == '+'      -> cycleBias succ
             | c == '-'      -> cycleBias pred
-            | c == ' '      ->  
+            | c == ' '      ->
                  modifyMVar_ appState $ \st -> return st {asNeedBuild = True}
-            | ord c == 13   ->  
+            | ord c == 13   ->
                  modifyMVar_ appState $ \st -> return st {asNeedSolve = True}
 
         SpecialKey sk
@@ -87,7 +87,7 @@ glutInputCallback appState key Down _ _ = do
 
         _   -> return ()
 
-glutInputCallback _ _ _ _ _ = 
+glutInputCallback _ _ _ _ _ =
     return ()
 
 
@@ -104,16 +104,15 @@ glutReshapeCallback appState (Size w h) = do
 
 glutDisplayCallback :: MVar AppState -> Glut.DisplayCallback
 glutDisplayCallback appState = do
-    AppState {..} <- readMVar appState
+    AppState{..} <- readMVar appState
     unless asRunning $ showMaze asQuadWH asSolution asMaze
 
 
 -- start/terminateMainLoop work around missing function
 -- 'Glut.leaveMainLoop' when not using freeGLUT
-terminateMainLoop =
-    Gl.get Glut.currentWindow
-    >>= maybe (return ()) Glut.destroyWindow
-    >> throwIO UserInterrupt
+terminateMainLoop = do
+    Gl.get Glut.currentWindow >>= mapM_ Glut.destroyWindow
+    throwIO UserInterrupt
 
 
 startMainLoop =
@@ -121,15 +120,15 @@ startMainLoop =
 
 
 -- set up OpenGL for a 2D scene
-glSetup2D (w, h) = do 
+glSetup2D (w, h) = do
     Gl.viewport             $= (Position 0 0, Size w h)
     Gl.matrixMode           $= Projection
     Gl.loadIdentity
     Gl.ortho                0.0 (fromIntegral w) 0.0 (fromIntegral h) 0.0 1.0
     Gl.matrixMode           $= Modelview 0
     Gl.loadIdentity
-    
-    
+
+
 -- OpenGL initialization
 initializeGL :: (GLint, GLint) -> String -> IO ()
 initializeGL screenDims windowName = do
