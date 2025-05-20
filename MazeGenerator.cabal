@@ -8,18 +8,21 @@ maintainer:          mgoremeier@gmail.com
 
 category:            Graphics
 build-type:          Simple
-cabal-version:       >=2.0
+cabal-version:       2.0
 
 executable MazeGenerator
-  main-is:              MazeGenerator.hs
+  main-is:              Main.hs
 
   other-modules:        GL
+                        MazeGenerator
                         RandomGeneration
                         Types
   
-  ghc-options:          -O2 -threaded -with-rtsopts=-N2
+  ghc-options:          -Wall
+                        -O2 -threaded "-with-rtsopts=-N2"
   
   default-extensions:   LambdaCase
+                        MultiWayIf
 
   build-depends:          base                    >=4.18
                         , random                  ^>=1.3
