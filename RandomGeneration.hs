@@ -11,9 +11,9 @@ randomElement [x]   = return x
 randomElement xs    = (xs !!) `fmap` randomRIO (0, length xs - 1)
 
 
--- Implementations for GenerationBias.
--- The basic functionality is shifting the odds between randomly
--- choosing the horizontal or vertical neighbour of some given
+-- implementations for GenerationBias.
+-- the basic functionality is shifting the odds between randomly
+-- choosing a horizontal or vertical neighbour of a given
 -- maze cell; different odds result in the desired visual pattern.
 randomBias :: GenerationBias -> (Int, Int) -> MazeIx -> [MazeIx] -> IO MazeIx
 randomBias NoBias _ _ xs =
@@ -23,19 +23,18 @@ randomBias CheckerBoard dims@(mazeW, mazeH) ix@(x, y) xs =
     let
         sqX     = 2*x `div` mazeW
         sqY     = 2*y `div` mazeH
-        bias    = bool HorizBias VertBias $
+        bias    = bool Horizontal Vertical $
             (odd sqY && even sqX) || (odd sqX && even sqY)
     in randomBias bias dims ix xs
 
 randomBias DiagonalSplit dims@(mazeW, mazeH) ix@(x, y) xs =
-    let bias    = bool VertBias HorizBias $ x > (y * mazeW) `div` mazeH
+    let bias    = bool Vertical Horizontal $ x > (y * mazeW) `div` mazeH
     in randomBias bias dims ix xs    
 
 randomBias bias _ (x, y) xs =
     let biased = filter filterFunc xs
     in randomElement $ concat $ xs : replicate 3 biased
-
   where 
     filterFunc = case bias of
-        VertBias    -> (== x) . fst
-        _           -> (== y) . snd                                     -- other biases than HorizBias matched beforehand
+        Vertical    -> (== x) . fst
+        Horizontal  -> (== y) . snd

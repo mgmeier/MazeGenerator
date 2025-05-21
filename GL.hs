@@ -1,38 +1,45 @@
-{-# LANGUAGE RecordWildCards, LambdaCase #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module  GL where
 
-import  Types
+import           Types
 
-import  Graphics.Rendering.OpenGL       as Gl
-import  Graphics.UI.GLUT                as Glut
+import           Graphics.Rendering.OpenGL as Gl
+import           Graphics.UI.GLUT          as Glut
 
-import  Control.Exception
+import           Control.Exception
 
-import  Data.Char                       (ord)
+import           Data.Char                 (ord)
 
 
+colorPath, colorSolution :: Color3 GLfloat
+colorWall :: Color4 GLfloat
 
--- produces 1 frame, rendering the maze with given quad sizes.
--- a list of red cells indicating the maze's solution is optional.
--- beware: always draws the complete maze, no optimisation
+colorPath     = Color3 0.8 0.8 0.8          -- maze path: white-ish light gray
+colorSolution = Color3 0.6 0.1 0.1          -- solution path: reddish
+colorWall     = Color4 0.1 0.1 0.1 1.0      -- maze walls: dark grey
+
+
+-- produces a singleframe, rendering the maze with given quad sizes.
+-- a list of soution cells ndicating the way through the maze is optional.
+-- NB: always converts and draws everything -- completely unoptimized
 showMaze :: (GLfloat, GLfloat) -> Maybe [MazeIx] -> [MazeIx] -> IO ()
-showMaze (w, h) redCells maze = do
+showMaze (w, h) solutionCells maze = do
     Gl.clear [ColorBuffer]
+    Gl.color colorPath
     Gl.unsafeRenderPrimitive Quads $
         mapM_ drawQuad maze
-    flip (maybe (return ())) redCells $ \ rs -> do
-        Gl.color        $  Color3 0.6 0.1 (0.1 :: GLfloat)
+    forM_ solutionCells $ \rs -> do
+        Gl.color colorSolution
         Gl.unsafeRenderPrimitive Quads $
             mapM_ drawQuad rs
-        Gl.color        $  Color3 0.8 0.8 (0.8 :: GLfloat)
     Glut.swapBuffers
 
   where
     glVertex2f x y = Gl.vertex $ Vertex2 x y
-  
+
     -- draws a quad (counter-clockwise)
-    drawQuad (blX, blY) = do                             
+    drawQuad (blX, blY) = do
         let
             x = fromIntegral blX * w
             y = fromIntegral blY * h
@@ -44,11 +51,8 @@ showMaze (w, h) redCells maze = do
 
 glutInputCallback :: MVar AppState -> Glut.KeyboardMouseCallback
 glutInputCallback appState key Down _ _ = do
-    AppState {..} <- readMVar appState
+    AppState{asDims = (w, h), ..} <- readMVar appState
     let
-        (w, h)      = asDims
-        key'        = bool key (SpecialKey $ KeyUnknown 0) asRunning    -- disregard keyboard input during animation
-
         newMazeDims mazeDims' =
              modifyMVar_ appState $ \st -> return st
                 { asDims        = mazeDims'
@@ -57,24 +61,25 @@ glutInputCallback appState key Down _ _ = do
                 , asShowBuild   = False
                 }
 
-        cycleBias withFunc =
-            try (evaluate $ withFunc asBuildBias) >>= either
-                (\(SomeException _) -> return ())
-                (\bias' ->  modifyMVar_ appState $ \st -> return st
+        cycleBias f =
+            try (evaluate $ f asBuildBias) >>= either
+                (\SomeException{} -> return ())
+                (\bias' ->  modifyAppStateAndPrint appState $ \st -> st
                     { asNeedBuild   = True
                     , asShowBuild   = False
                     , asBuildBias   = bias'
                     })
 
-    case key' of
+    -- disregard keyboard input during animation
+    unless asAnimating $ case key of
         Char c
-            | ord c == 27   -> terminateMainLoop
+            | ord c == 27   -> terminateMainLoop appState
             | c == '+'      -> cycleBias succ
             | c == '-'      -> cycleBias pred
-            | c == ' '      ->  
-                 modifyMVar_ appState $ \st -> return st {asNeedBuild = True}
-            | ord c == 13   ->  
-                 modifyMVar_ appState $ \st -> return st {asNeedSolve = True}
+            | c == ' '      ->
+                 modifyAppState appState $ \st -> st {asNeedBuild = True}
+            | ord c == 13   ->
+                 modifyAppState appState $ \st -> st {asNeedSolve = True}
 
         SpecialKey sk
             | sk == KeyLeft     && w > 8    -> newMazeDims (w-1, h)
@@ -82,12 +87,11 @@ glutInputCallback appState key Down _ _ = do
             | sk == KeyUp       && h < 256  -> newMazeDims (w, h+1)
             | sk == KeyDown     && h > 8    -> newMazeDims (w, h-1)
             | sk == KeyF1 ->
-                 modifyMVar_ appState $
-                    \st -> return st {asShowBuild = not asShowBuild}
+                 modifyAppStateAndPrint appState $ \st -> st {asShowBuild = not asShowBuild}
 
         _   -> return ()
 
-glutInputCallback _ _ _ _ _ = 
+glutInputCallback _ _ _ _ _ =
     return ()
 
 
@@ -101,41 +105,65 @@ glutReshapeCallback appState (Size w h) = do
         }
     Glut.postRedisplay Nothing
 
-
 glutDisplayCallback :: MVar AppState -> Glut.DisplayCallback
 glutDisplayCallback appState = do
-    AppState {..} <- readMVar appState
-    unless asRunning $ showMaze asQuadWH asSolution asMaze
+    AppState{..} <- readMVar appState
+    -- the callback should only display the static maze, immediately; animation is handled by generateMaze / solveMaze themselves
+    unless asAnimating $
+        showMaze asQuadWH asSolution asMaze
 
 
 -- start/terminateMainLoop work around missing function
 -- 'Glut.leaveMainLoop' when not using freeGLUT
-terminateMainLoop =
-    Gl.get Glut.currentWindow
-    >>= maybe (return ()) Glut.destroyWindow
-    >> throwIO UserInterrupt
+terminateMainLoop :: MVar AppState -> IO ()
+terminateMainLoop appState = do
+    -- obsolete any frame that may still have an open render request
+    -- to guard against GLUT calls erroring without a window
+    as <- readMVar appState
+    asRenderFrame as RendererQuit
+    Gl.get Glut.currentWindow >>= mapM_ Glut.destroyWindow
 
+startMainLoop :: MVar AppState -> IO ()
+startMainLoop appState = do
+    renderArgs <- newMVar RendererIdle
+    let
+        -- 20ms delay -> max 50fps
+        frameDelayLoop = Glut.addTimerCallback 20 renderCallback
 
-startMainLoop =
-    handle (\UserInterrupt -> return ()) Glut.mainLoop
+        -- if there's an unprocessed render request, it will be dropped in favor of the incoming one
+        renderCommand = void . swapMVar renderArgs
 
+        -- by using a periodic GLUT timer callback, we ensure that
+        -- 1. it executes in the same thread as the GLUT mainloop
+        -- 2. it doesn't block the mainloop
+        -- 3. there may be GLUT implementations where this is unnecessary, but better safe than sorry
+        renderCallback :: Glut.TimerCallback
+        renderCallback = 
+            swapMVar renderArgs RendererIdle >>= \case
+                RendererIdle        -> frameDelayLoop
+                RenderFrame a b c   -> showMaze a b c >> frameDelayLoop
+                RendererQuit        -> pure ()
+
+    modifyAppState appState $ \st -> st {asRenderFrame = renderCommand}
+    frameDelayLoop
+    Glut.mainLoop
 
 -- set up OpenGL for a 2D scene
-glSetup2D (w, h) = do 
+glSetup2D :: (GLsizei, GLsizei) -> IO ()
+glSetup2D (w, h) = do
     Gl.viewport             $= (Position 0 0, Size w h)
     Gl.matrixMode           $= Projection
     Gl.loadIdentity
     Gl.ortho                0.0 (fromIntegral w) 0.0 (fromIntegral h) 0.0 1.0
     Gl.matrixMode           $= Modelview 0
     Gl.loadIdentity
-    
-    
+
 -- OpenGL initialization
 initializeGL :: (GLint, GLint) -> String -> IO ()
 initializeGL screenDims windowName = do
-    Glut.getArgsAndInitialize
+    _ <- Glut.getArgsAndInitialize
     Glut.initialDisplayMode $= [DoubleBuffered, RGBMode]
     Glut.initialWindowSize  $= uncurry Size screenDims
-    Glut.createWindow       windowName
+    _ <- Glut.createWindow  windowName
     glSetup2D               screenDims
-    Gl.clearColor           $= Color4 0.1 0.1 0.1 (1.0 :: GLfloat)
+    Gl.clearColor           $= colorWall
